@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -15,36 +15,42 @@ pub struct KvStore {
     reader: BufReader<File>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Command {
+    Set(String, String),
+    Remove(String),
+}
+
 pub type Result<T> = anyhow::Result<T, anyhow::Error>;
 
 impl KvStore {
     /// Opens a `KvStore` with the given file path, creating a new file if it doesn't exist.
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         let path = path.into();
-
-        let writer = BufWriter::new(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(&path)?,
-        );
-
-        let mut reader = BufReader::new(File::open(&path)?);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .append(true)
+            .open(&path)?;
+        let mut reader = BufReader::new(file.try_clone()?);
+        let writer = BufWriter::new(file);
 
         let mut index = HashMap::new();
-        let mut pos = reader.stream_position()?;
-        while let Ok(cmd) = serde_json::from_reader::<_, Command>(&mut reader) {
-            match cmd {
-                Command::Set(key, _) => {
-                    index.insert(key, pos);
-                }
-                Command::Remove(key) => {
-                    index.remove(&key);
+        let mut pos = 0;
+
+        let mut line = String::new();
+        while reader.read_line(&mut line)? != 0 {
+            if let Ok(cmd) = serde_json::from_str::<Command>(&line) {
+                if let Command::Set(ref key, _) = cmd {
+                    index.insert(key.clone(), pos);
                 }
             }
             pos = reader.stream_position()?;
+            line.clear();
         }
+
+        reader.seek(SeekFrom::Start(0))?;
 
         Ok(KvStore {
             index,
@@ -70,6 +76,7 @@ impl KvStore {
         let pos = self.writer.stream_position()?;
         let cmd = Command::Set(key.clone(), value);
         serde_json::to_writer(&mut self.writer, &cmd)?;
+        writeln!(self.writer)?;
         self.writer.flush()?;
         self.index.insert(key, pos);
         Ok(())
@@ -79,23 +86,19 @@ impl KvStore {
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         if let Some(&pos) = self.index.get(&key) {
             self.reader.seek(SeekFrom::Start(pos))?;
-            if let Command::Set(_, value) = serde_json::from_reader(&mut self.reader)? {
+            let mut cmd_string = String::new();
+            self.reader.read_line(&mut cmd_string)?;
+
+            if let Ok(Command::Set(_, value)) = serde_json::from_str(&cmd_string.trim_end()) {
                 return Ok(Some(value));
             }
         }
+
         Ok(None)
     }
 
     /// Removes a key from the store. Does nothing if the key does not exist.
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    pub fn remove(&mut self, _: String) -> Result<()> {
         unimplemented!();
-        self.index.remove(&key);
-        Ok(())
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum Command {
-    Set(String, String),
-    Remove(String),
 }
