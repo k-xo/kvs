@@ -1,0 +1,12 @@
+[package]
+name = "kvs"
+version = "0.1.0"
+edition = "2021"
+description = "A simple key-value store"
+license = "MIT"
+
+
+[dependencies]
+byteorder = "1.5.0"
+clap = { version = "4.5.13", features = ["derive"] }
+crc = "1.7"
