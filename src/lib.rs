@@ -2,21 +2,25 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc::crc32;
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
+    sync::{Arc, Mutex},
 };
 
 type ByteStr = [u8];
 type ByteString = Vec<u8>;
 
+#[derive(Debug)]
 pub struct KeyValuePair {
     pub key: ByteString,
     pub value: ByteString,
 }
+
+#[derive(Debug)]
 pub struct KvStore {
-    f: File,
-    pub index: HashMap<ByteString, u64>,
+    f: Arc<Mutex<File>>,
+    pub index: Arc<Mutex<HashMap<ByteString, u64>>>,
 }
 
 impl KvStore {
@@ -30,12 +34,16 @@ impl KvStore {
 
         let index = HashMap::new();
 
-        Ok(Self { f, index })
+        Ok(Self {
+            f: Arc::new(Mutex::new(f)),
+            index: Arc::new(Mutex::new(index)),
+        })
     }
 
     // Build in-memory index of the key-value pairs stored in file
     pub fn load(&mut self) -> io::Result<()> {
-        let mut f = BufReader::new(&mut self.f);
+        let mut file_lock = self.f.lock().unwrap();
+        let mut f = BufReader::new(&mut *file_lock);
 
         loop {
             let position = f.seek(SeekFrom::Current(0))?;
@@ -51,7 +59,7 @@ impl KvStore {
                 },
             };
 
-            self.index.insert(kv.key, position);
+            self.index.lock().unwrap().insert(kv.key, position);
         }
 
         Ok(())
@@ -107,7 +115,7 @@ impl KvStore {
     }
 
     pub fn get(&mut self, key: &ByteStr) -> io::Result<Option<ByteString>> {
-        let position = match self.index.get(key) {
+        let position = match self.index.lock().unwrap().get(key) {
             None => return Ok(None),
             Some(pos) => *pos,
         };
@@ -118,7 +126,9 @@ impl KvStore {
     }
 
     pub fn get_at(&mut self, position: u64) -> io::Result<KeyValuePair> {
-        let mut f = BufReader::new(&mut self.f);
+        let mut file_lock = self.f.lock().unwrap();
+        let mut f = BufReader::new(&mut *file_lock);
+
         f.seek(SeekFrom::Start(position))?;
         let kv = KvStore::process_record(&mut f)?;
 
@@ -128,12 +138,66 @@ impl KvStore {
     pub fn insert(&mut self, key: &ByteStr, value: &ByteStr) -> io::Result<()> {
         let position = self.insert_but_ignore_index(key, value)?; // get position of the start of data
 
-        self.index.insert(key.to_vec(), position);
+        self.index.lock().unwrap().insert(key.to_vec(), position);
+        Ok(())
+    }
+
+    pub fn compact(&mut self) -> io::Result<()> {
+        let binding = self.index.clone();
+        let index_lock = binding.lock().unwrap();
+
+        let temp_path = "db2";
+        let mut temp_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true) // truncate any existing data in the temp file
+            .open(temp_path)?;
+
+        let mut new_index = HashMap::new();
+
+        for (_, &position) in &*index_lock {
+            let kv = self.get_at(position)?;
+            let new_position = temp_file.seek(SeekFrom::Current(0))?;
+
+            let key_len = kv.key.len() as u32;
+            let val_len = kv.value.len() as u32;
+            let mut tmp = Vec::with_capacity(key_len as usize + val_len as usize);
+            tmp.extend_from_slice(&kv.key);
+            tmp.extend_from_slice(&kv.value);
+            let checksum = crc32::checksum_ieee(&tmp);
+
+            temp_file.write_u32::<LittleEndian>(checksum)?;
+            temp_file.write_u32::<LittleEndian>(key_len)?;
+            temp_file.write_u32::<LittleEndian>(val_len)?;
+            temp_file.write_all(&tmp)?;
+
+            new_index.insert(kv.key.clone(), new_position);
+        }
+
+        temp_file.flush()?;
+        temp_file.sync_all()?;
+
+        let db_path = "db";
+        fs::rename(temp_path, db_path)?;
+
+        self.f = Arc::new(Mutex::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .append(true)
+                .open(db_path)?,
+        ));
+
+        // replace old index with the new index
+        self.index = Arc::new(Mutex::new(new_index));
+
         Ok(())
     }
 
     pub fn insert_but_ignore_index(&mut self, key: &ByteStr, value: &ByteStr) -> io::Result<u64> {
-        let mut f = BufWriter::new(&mut self.f);
+        let mut file_lock = self.f.lock().unwrap();
+        let mut f = BufWriter::new(&mut *file_lock);
 
         let key_len = key.len();
         let val_len = value.len();
