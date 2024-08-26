@@ -42,8 +42,8 @@ impl KvStore {
 
     // Build in-memory index of the key-value pairs stored in file
     pub fn load(&mut self) -> io::Result<()> {
-        let mut file_lock = self.f.lock().unwrap();
-        let mut f = BufReader::new(&mut *file_lock);
+        let file_lock = self.f.lock().unwrap();
+        let mut f = BufReader::new(&*file_lock);
 
         loop {
             let position = f.seek(SeekFrom::Current(0))?;
@@ -126,8 +126,8 @@ impl KvStore {
     }
 
     pub fn get_at(&mut self, position: u64) -> io::Result<KeyValuePair> {
-        let mut file_lock = self.f.lock().unwrap();
-        let mut f = BufReader::new(&mut *file_lock);
+        let file_lock = self.f.lock().unwrap();
+        let mut f = BufReader::new(&*file_lock);
 
         f.seek(SeekFrom::Start(position))?;
         let kv = KvStore::process_record(&mut f)?;
@@ -196,8 +196,8 @@ impl KvStore {
     }
 
     pub fn insert_but_ignore_index(&mut self, key: &ByteStr, value: &ByteStr) -> io::Result<u64> {
-        let mut file_lock = self.f.lock().unwrap();
-        let mut f = BufWriter::new(&mut *file_lock);
+        let file_lock = self.f.lock().unwrap();
+        let mut f = BufWriter::new(&*file_lock);
 
         let key_len = key.len();
         let val_len = value.len();
